@@ -1,0 +1,263 @@
+#check-groups:
+#  filename: "group"
+#  type: "file"
+#check-passwd:
+#  filename: "passwd"
+#  type: "file"
+variables:
+  distro: "fedora"
+  passwd_mode: full
+# This file configures things relevant to `rpm-ostree compose postprocess`.
+conditional-include:
+  - if: passwd_mode == "full"
+    include:
+      check-groups:
+        filename: "group"
+        type: "file"
+      check-passwd:
+        filename: "passwd"
+        type: "file"
+  - if: passwd_mode == "nobody"
+    include:
+      check-passwd:
+        type: "file"
+        filename: "passwd-nobody"
+      check-groups:
+        type: "file"
+        filename: "group-nobody"
+  - if: passwd_mode == "none"
+    include:
+      check-groups:
+        type: "none"
+      check-passwd:
+        type: "none"
+# Default to `bash` in our container, the same as other containers we ship.
+container-cmd:
+  - /sbin/init
+edition: "2024"
+# By default users and groups are injected to nss-altfiles
+# which is immutable. This list moves a selected set
+# to /etc/group instead, which is mutable per system
+# and allows local users to become part of these groups.
+etc-group-members:
+  - wheel
+  - systemd-journal
+  - tss # https://issues.redhat.com/browse/BIFROST-618
+  - kvm # https://issues.redhat.com/browse/RHEL-115278
+  - adm
+exclude-packages:
+  # Exclude kernel-debug-core to make sure that it doesn't somehow get
+  # chosen as the package to satisfy the `kernel-core` dependency from
+  # the kernel package.
+  - kernel-debug-core
+  - kernel-debug
+ignore-removed-groups:
+  - root
+ignore-removed-users:
+  - root
+# https://github.com/CentOS/centos-bootc/issues/167
+machineid-compat: true
+metadata:
+  summary: Effectively just bootc, systemd, kernel, and dnf as a starting point.
+# We want content lifecycled with the image
+opt-usrlocal: "root"
+# Enable the Linux kernel; see also kernel-rt.
+packages:
+  # https://gitlab.com/fedora/bootc/base-images/-/issues/12
+  - fedora-repos-archive
+  # Not in RHEL10
+  - systemd-resolved
+  # systemd. Also name systemd-pam because it was dropped to a recommends
+  # but we still want it for handling user logins/sessions.
+  - systemd systemd-pam
+  # bootc itself.
+  - bootc
+  # Required by bootc install, sgdisk has been replaced by Rust crate
+  # in bootc https://github.com/containers/bootc/pull/775
+  - xfsprogs e2fsprogs dosfstools
+  - bootupd
+  - kernel
+  # this is implied by dependencies but let's make it explicit
+  - coreutils
+  # We need dnf for building derived container images. In Fedora, this pulls
+  # in dnf5. In CentOS/RHEL, this pulls in dnf(4). We can simplify this back to
+  # just `dnf` once the `dnf` package is retired from Fedora.
+  - /usr/bin/dnf
+  # Even in minimal, we have this.  If you don't want SELinux today, you'll need
+  # to build a custom image.
+  - selinux-policy-targeted
+  # And we want container-selinux because trying to layer it on later currently causes issues.
+  - container-selinux
+  # Needed for tpm2 bound luks
+  - tpm2-tools
+  - ostree nss-altfiles
+# bootloader
+packages-aarch64:
+  - grub2-efi-aa64 efibootmgr shim
+packages-ppc64le:
+  - grub2 ostree-grub2
+packages-riscv64:
+  - grub2-efi-riscv64 efibootmgr
+  # Don't specify just `shim` for now because riscv isn't built in
+  # main koji instance yet and thus isn't signed. Here we specify
+  # the path to the provided file so when we do switch to the signed
+  # `shim` package it will transparently happen and we can clean up
+  # this packagelist entry later.
+  - /boot/efi/EFI/fedora/shimriscv64.efi
+packages-x86_64:
+  - grub2 grub2-efi-x64 efibootmgr shim
+  - microcode_ctl
+# Postprocessing relating to systemd presets on the system.
+postprocess:
+  # See also https://github.com/openshift/os/blob/f6cde963ee140c02364674db378b2bc4ac42675b/common.yaml#L156
+  # This one is undoes the effect of
+  # # RHEL-only: Disable /tmp on tmpfs.
+  #Wants=tmp.mount
+  # in /usr/lib/systemd/system/basic.target
+  # We absolutely must have tmpfs-on-tmp for multiple reasons,
+  # but the biggest is that when we have composefs for / it's read-only,
+  # and for units with ProtectSystem=full systemd clones / but needs
+  # a writable place.
+  - |
+    #!/usr/bin/env bash
+    set -xeuo pipefail
+    mkdir -p /usr/lib/systemd/system/local-fs.target.wants
+    if test '!' -f /usr/lib/systemd/system/local-fs.target.wants/tmp.mount; then
+      ln -sf ../tmp.mount /usr/lib/systemd/system/local-fs.target.wants
+    fi
+
+    # See https://github.com/containers/bootc/issues/358
+    # basically systemd-tmpfiles doesn't follow symlinks; ordinarily our
+    # tmpfiles.d unit for `/var/roothome` is fine, but this actually doesn't
+    # work if we want to use tmpfiles.d to write to `/root/.ssh` because
+    # tmpfiles gives up on that before getting to `/var/roothome`.
+    #
+    # Redirect stdout to /dev/null because of some weird stdout issue
+    # with newer rpm-ostree: https://github.com/coreos/rpm-ostree/pull/5388#issuecomment-2971623787
+    sed -i -e 's, /root, /var/roothome,' /usr/lib/tmpfiles.d/provision.conf > /dev/null
+    # Because /var/roothome is also defined in rpm-ostree-0-integration.conf
+    # we need to delete /var/roothome
+    #
+    # Redirect stdout to /dev/null because of some weird stdout issue
+    # with newer rpm-ostree: https://github.com/coreos/rpm-ostree/pull/5388#issuecomment-2971623787
+    sed -i -e '/^d- \/var\/roothome /d' /usr/lib/tmpfiles.d/provision.conf > /dev/null
+  - |
+    #!/bin/bash
+    set -xeuo pipefail
+    # Transforms /usr/lib/ostree-boot into a bootupd-compatible update payload
+    /usr/bin/bootupctl backend generate-update-metadata
+  - |
+    #!/bin/bash
+    # Workaround for https://issues.redhat.com/browse/RHEL-78104
+    set -xeuo pipefail
+    rm -vrf /usr/lib/ostree-boot/loader
+  - |
+    #!/usr/bin/env bash
+    set -xeuo pipefail
+    mkdir -p /usr/lib/dracut/dracut.conf.d
+    cat > /usr/lib/dracut/dracut.conf.d/20-bootc-base.conf << 'EOF'
+    # We want a generic image; hostonly makes no sense as part of a server side build
+    hostonly=no
+    # Dracut will always fail to set security.selinux xattrs at build time
+    # https://github.com/dracut-ng/dracut-ng/issues/1561
+    export DRACUT_NO_XATTR=1
+    add_dracutmodules+=" kernel-modules dracut-systemd systemd-initrd base ostree "
+    EOF
+    cat > /usr/lib/dracut/dracut.conf.d/22-bootc-generic.conf << 'EOF'
+    # Extra modules that we want by default that are known to exist in the kernel
+    add_dracutmodules+=" virtiofs "
+    EOF
+    cat > /usr/lib/dracut/dracut.conf.d/49-bootc-tpm2-tss.conf << 'EOF'
+    # We want this for systemd-cryptsetup tpm2 locking
+    add_dracutmodules+=" tpm2-tss "
+    EOF
+    cat > /usr/lib/dracut/dracut.conf.d/59-altfiles.conf << 'EOF'
+    # https://issues.redhat.com/browse/RHEL-49590
+    # On image mode systems we use nss-altfiles for passwd and group,
+    # this makes sure dracut uses them which also fixes kdump writing to NFS.
+    install_items+=" /usr/lib/passwd /usr/lib/group "
+    EOF
+  - |
+    #!/usr/bin/env bash
+    set -xeuo pipefail
+    source /usr/lib/os-release
+    mkdir -p /usr/lib/kernel/install.conf.d
+    echo -e "# kernel-install will not try to run dracut and allow rpm-ostree to\n\
+    # take over. Rpm-ostree will use this to know that it is responsible\n\
+    # to run dracut and ensure that there is only one kernel in the image\n\
+    layout=ostree" | tee /usr/lib/kernel/install.conf /usr/lib/kernel/install.conf.d/00-bootc-kernel-layout.conf > /dev/null
+    # By default dnf keeps multiple versions of the kernel, with this
+    # configuration we tell dnf to treat the kernel as everything else.
+    # https://dnf.readthedocs.io/en/latest/conf_ref.html#main-options
+    # Let's add the config to a distribution configuration file if dnf5
+    # is used, we append to /etc/dnf/dnf.conf if not.
+    # Also set protect_running_kernel=False, dnf/yum pre-dates Containers and
+    # uses uname to protect the running kernel even on Container builds.
+    if [ -d "/usr/share/dnf5/libdnf.conf.d/" ]; then
+      echo -e "[main]\ninstallonlypkgs=''" >> /usr/share/dnf5/libdnf.conf.d/20-ostree-installonlypkgs.conf
+      echo -e "[main]\nprotect_running_kernel=False" >> /usr/share/dnf5/libdnf.conf.d/20-ostree-protect_running_kernel.conf
+    else
+      echo "installonlypkgs=''" >> /etc/dnf/dnf.conf
+      echo "protect_running_kernel=False" >> /etc/dnf/dnf.conf
+    fi
+  # Set up default root config
+  - |
+    #!/usr/bin/env bash
+    set -xeuo pipefail
+    mkdir -p /usr/lib/ostree
+    cat > /usr/lib/ostree/prepare-root.conf << EOF
+    [composefs]
+    enabled = yes
+    [sysroot]
+    readonly = true
+    EOF
+  - |
+    #!/bin/bash
+    set -xeuo pipefail
+    # Override some of the default presets.
+    cat <<EOF > usr/lib/systemd/system-preset/85-bootc.preset
+    # Disable dnf-makecache.timer on bootc/image mode systems
+    # https://github.com/coreos/fedora-coreos-tracker/issues/1896#issuecomment-2848251507
+    disable dnf-makecache.timer
+    EOF
+  # Enable bootloader-update.service on F43+.
+  # https://github.com/coreos/fedora-coreos-tracker/issues/1468#issuecomment-2996654547
+  # https://fedoraproject.org/wiki/Changes/AutomaticBootloaderUpdatesBootc
+  - |
+    #!/bin/bash
+    set -xeuo pipefail
+    source /usr/lib/os-release
+    if [ $ID == "fedora" ] && [ ${VERSION_ID} -ge 43 ]; then
+      echo "enable bootloader-update.service" >> /usr/lib/systemd/system-preset/85-bootc.preset
+    fi
+  # Undo RPM scripts enabling units; we want the presets to be canonical
+  # https://github.com/projectatomic/rpm-ostree/issues/1803
+  - |
+    #!/bin/bash
+    set -xeuo pipefail
+    rm -rf /etc/systemd/system/*
+    systemctl preset-all
+    rm -rf /etc/systemd/user/*
+    systemctl --user --global preset-all
+  - |
+    #!/bin/bash
+    set -xeuo pipefail
+    cat >/usr/lib/tmpfiles.d/bootc-base-rpmstate.conf <<'EOF'
+    # Workaround for https://bugzilla.redhat.com/show_bug.cgi?id=771713
+    d /var/lib/rpm-state 0755 - - -
+    EOF
+    # Workaround for https://issues.redhat.com/browse/RHEL-106203
+    rm -f /usr/lib/tmpfiles.d/home.conf
+# Be minimal
+recommends: false
+remove-from-packages:
+  # The grub bits are mainly designed for desktops, and IMO haven't seen
+  # enough testing in concert with ostree. At some point we'll flesh out
+  # the full plan in https://github.com/coreos/fedora-coreos-tracker/issues/47
+  - [grub2-tools, /etc/grub.d/08_fallback_counting, /etc/grub.d/10_reset_boot_success, /etc/grub.d/12_menu_auto_hide, /usr/lib/systemd/.*]
+  # Generally we expect other tools to do this (e.g. Ignition or cloud-init)
+  - [systemd, /usr/lib/systemd/system/sysinit.target.wants/systemd-firstboot.service]
+rpmdb: target
+# We never want rpmdb.sqlite-shm as it's unreproducible
+rpmdb-normalize: true
+
