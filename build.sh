@@ -7,8 +7,11 @@ name="fedora-bootc-minimal"
 rel="43"
 ts="main"
 
-while getopts ":d:n:r:s:" opt; do
+while getopts ":c:d:n:r:s:" opt; do
     case ${opt} in
+        c)
+            containerfile="$OPTARG"
+            ;;
         d)
             registry="$OPTARG"
             ;;
@@ -48,7 +51,7 @@ for n in "${tagged_names[@]}"; do
 done
 
 # build the container
-podman build --security-opt=label=disable --cap-add=all --device /dev/fuse --build-arg RELEASE="${rel}" "${tag_opts[@]}" -f Containerfile .
+podman build --security-opt=label=disable --cap-add=all --device /dev/fuse --build-arg RELEASE="${rel}" "${tag_opts[@]}" -f "${containerfile}" .
 
 # push if a registry was specified
 if [ -v registry ]; then
