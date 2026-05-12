@@ -3,6 +3,7 @@
 set -xeu
 
 # defaults
+containerfile="Containerfile"
 name="fedora-bootc-minimal"
 rel="43"
 ts="main"
