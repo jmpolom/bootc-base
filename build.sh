@@ -8,21 +8,36 @@ name="fedora-bootc-minimal"
 rel="43"
 ts="main"
 
+assert_not_empty() {
+    local argn="$1"
+    local val="$2" 
+
+    if [ -z "$val" ]; then
+        echo "Invalid argument for -$argn: must not be empty" >&2
+        exit 2
+    fi
+}
+
 while getopts ":c:d:n:r:s:" opt; do
     case ${opt} in
         c)
+            assert_not_empty "c" "$OPTARG"
             containerfile="$OPTARG"
             ;;
         d)
+            assert_not_empty "d" "$OPTARG"
             registry="$OPTARG"
             ;;
         n)
+            assert_not_empty "n" "$OPTARG"
             name="$OPTARG"
             ;;
         r)
+            assert_not_empty "r" "$OPTARG"
             rel="$OPTARG"
             ;;
         s)
+            assert_not_empty "s" "$OPTARG"
             # tag suffixes
             tss+=("$OPTARG")
             ;;
