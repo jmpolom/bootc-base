@@ -1,9 +1,15 @@
 name: Build and push ostree container
 
 on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 19 * * 6'
   push:
     branches:
-      - '**'
+      - "main"
+      - "test"
+      - "stage"
+      - "next"
 
 jobs:
   build:
@@ -21,12 +27,9 @@ jobs:
           - "44"
     steps:
       - uses: actions/checkout@v4
-      # https://github.com/actions/checkout/issues/760
-      # - name: Mark git checkout as safe
-      #   run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Login to registry
         run: podman login --username ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }} ghcr.io
       - name: Build ostree container
         run: |
           branch_tag=$(echo "${{ github.ref_name }}" | tr '/' '-')
-          ./build.sh -d ghcr.io -r ${{ matrix.release_version }} -n "${GITHUB_REPOSITORY,,}" -s "${branch_tag}" -s "${{ github.sha }}"
+          ./build.sh -d ghcr.io -r ${{ matrix.release_version }} -n bootc-base -s "${branch_tag}" -s "${{ github.sha }}"
