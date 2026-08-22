@@ -67,7 +67,14 @@ for n in "${tagged_names[@]}"; do
 done
 
 # build the container
-podman build --security-opt=label=disable --cap-add=all --device /dev/fuse --build-arg RELEASE="${rel}" "${tag_opts[@]}" -f "${containerfile}" .
+podman build \
+    --security-opt=label=disable \
+    --cap-add=all \
+    --device /dev/fuse \
+    --build-arg RELEASE="${rel}" \
+    "${tag_opts[@]}" \
+    -f "${containerfile}" \
+    .
 
 # push if a registry was specified
 if [ -v registry ]; then
